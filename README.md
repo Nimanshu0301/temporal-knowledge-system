@@ -1,85 +1,141 @@
-# Hackathon: Build a Knowledge System That Knows What's True *Now*
+# Temporal Knowledge System
 
-## The problem in one minute
+A dependency-free temporal retrieval system for the interface.ai Applied AI Engineer build assignment. It answers member questions from dated credit-union website snapshots, cites the supporting page, preserves historical context for `as_of` questions, and abstains when the supplied snapshots do not support an answer.
 
-Our assistant answers credit-union members' questions ("What's the 6-month certificate rate?", "How much is a lost debit card?") using the credit union's own website.
+The central rule is simple: **newer is not automatically truer**. The system keeps complete snapshots, selects the correct point in time first, and then prefers authoritative current product pages over blogs, news, PDFs, and expired offers.
 
-We download (crawl) that website again and again over time. Each download is a **snapshot**. Websites are messy:
+## Public-evaluation result
 
-- A rate changes, but an old page or PDF still shows the old number.
-- A promotion ends, but its page is never taken down.
-- One page lists the **rate**, another the **APY**, and they look like they disagree.
-- A table has tiers (by balance, by term). Read it carelessly and every tier looks like a conflict.
-- Old newsletters and press releases describe offers from years ago.
+| Metric | Result |
+| --- | ---: |
+| Public-eval score | **0.9643** |
+| Questions | 40 |
+| Errors | **0** |
+| Stale-answer traps | **0** |
+| Repeat consistency | 1.00 |
+| Paraphrase consistency | 1.00 |
+| Ingest time | 1.4 s |
+| P95 answer latency | 0.01 s |
 
-When we combined these snapshots, our system **gave members wrong or out-of-date answers**. Every eval question in this kit comes from a real problem like that.
+These results are from a local run of the supplied public evaluator against the five supplied snapshots. The score is a public-eval result, not a claim about the hidden evaluation set.
 
-**Your mission:** build a system that reads the snapshots in date order and answers questions the way a careful human expert would: with the **current** value, the **right** tier, a **source**, and an honest "I don't know" when the site doesn't say.
+## Design
 
-## What's in the box
-
+```text
+dated website snapshots
+        │
+        ▼
+ingest: preserve pages, snapshot IDs, dates, token statistics, and table rows
+        │
+        ▼
+select one complete state: latest, or the latest snapshot on/before `as_of`
+        │
+        ├── focused product responders ──► qualified answer + source
+        └── source-aware lexical retrieval ──► concise passage + source / abstention
 ```
-snapshots_zip/           the five website downloads, one zip per date (oldest first)
-snapshots/README.md      what each download is and what changed between them
-eval/public_eval.jsonl   40 practice questions with expected answers
-starter/solution.py      a working (but naive) solution to copy from
-harness/                 the scorer we will use (same one you can run)
+
+### Snapshot-first temporal model
+
+`ingest()` stores each crawl as a distinct, date-ordered state. A question with no `as_of` value uses the newest snapshot. For an `as_of` value, the system selects the latest complete snapshot whose date is on or before that date. It does not blend pages from different crawls, preventing a new page from being answered with an old rate table.
+
+### Qualified financial facts
+
+Financial tables are retained as rows rather than flattened into isolated values. This keeps a rate associated with the relevant term, balance range, loan amount, model year, and rate/APY column. The focused responders use those row-level qualifiers for common certificate, savings, checking, auto-loan, personal-loan, and mortgage questions.
+
+### Authority and evidence
+
+Answers carry the source URL, snapshot ID, and—when available—a short quote. Primary product, business, contact, and about pages receive higher retrieval authority; blogs, newsroom pages, PDFs, and expired-offer pages receive lower authority. For unsupported rate questions, the system returns a non-confident answer instead of inventing a value.
+
+## Interface contract
+
+The submission exposes `build()` in `submission/solution.py`. It returns an object with the assignment contract:
+
+```python
+system = build()
+system.ingest(snapshot)                         # snapshots arrive oldest → newest
+answer = system.answer(question, as_of=None)    # Answer(text, sources, confident, ...)
+conflicts = system.conflicts()                   # list[Conflict]
 ```
 
-**You don't need to unzip anything.** The first time you run the scorer (below), it unpacks the zips into `snapshots/`, with one folder per download, each holding a `manifest.json` (url, title, date) and the pages as `pages/*.md`. After that the folders are there to browse. If you'd rather look first, unzip them yourself into `snapshots/`; the scorer leaves existing folders alone.
+The implementation uses only Python's standard library and requires Python 3.9 or later. No API keys, model calls, or third-party packages are required.
 
-## What you must hand in
+## Conflict handling
 
-A folder with a file called `solution.py`, containing a `build()` function that returns an object with **three methods**:
+The submitted implementation treats a changed rate as a conflict only when the same labeled rate-table row appears with different values across dated, primary product/rate pages. It also considers labeled rate prose. When there is a high-confidence historical conflict, the later primary-page value is selected and both sources are retained in the `Conflict` object.
 
-| Method | What it does |
-|---|---|
-| `ingest(snapshot)` | We call it once per snapshot, oldest first. Learn from it. |
-| `answer(question, as_of=None)` | Answer a member's question. Without `as_of`, answer from the newest snapshot. With a date, answer as the website stood on that day. |
-| `conflicts()` | List every place where the website contradicts itself, which value you believe is right, and why. |
+The system intentionally does **not** treat all differences as conflicts:
 
-The exact shapes are defined in `harness/contract.py`; `starter/solution.py` already follows them. **Don't rename anything.** We plug your folder straight into our scorer.
+- Different balance, term, model-year, or loan-amount tiers are separate facts.
+- Rate versus APY is not a contradiction.
+- Blogs, news, promotional pages, and expired offers are historical evidence, not equal-authority current rate pages.
 
-You can use any tools you like inside: search, embeddings, a graph, an LLM, plain rules. Add a `requirements.txt` if you need packages, and say in a short `NOTES.md` which API keys (if any) you need.
+### Conflict-audit note
 
-## How to check your work
+The project review inventory records **45 candidate contradictions: 37 across historical snapshots and 8 within a single snapshot**. This is useful context for reviewing the dataset. The version of `submission/solution.py` in this repository deliberately reports a narrower, high-confidence cross-snapshot rate-change set: it deduplicates output, caps the returned list at 30, and **does not currently emit the eight same-snapshot findings**. The counts above should therefore not be read as the runtime output of `conflicts()`; same-snapshot comparison is a clearly bounded next extension.
 
-From the top folder of this kit, run:
+## Local setup and evaluation
+
+Clone this repository alongside the participant kit, or copy the `submission/` directory into the kit root. The supplied snapshots must be available locally but must not be committed.
 
 ```bash
-python harness/run_eval.py --submission starter --eval eval/public_eval.jsonl
+python3 --version                 # Python 3.9+
+python3 -m venv .venv
+source .venv/bin/activate
+
+# No installation is needed: requirements.txt declares no third-party packages.
+python3 harness/run_eval.py \
+  --submission submission \
+  --eval eval/public_eval.jsonl \
+  --out results/public
 ```
 
-The first run takes a few extra seconds while it unpacks the snapshots. Then it loads all five downloads into the starter, asks the 40 practice questions, and prints your score. To test your own solution, point `--submission` at your folder.
+On a fresh participant kit, the evaluator automatically expands the supplied snapshot ZIPs into `snapshots/`. Re-running the command is deterministic for a fixed snapshot set and evaluator.
 
-The starter scores low on purpose. Watch your score go up as you improve. Needs Python 3.9 or newer.
+To run the harness's small self-test (when included in the kit):
 
-## How you will be scored
+```bash
+python3 harness/run_eval.py \
+  --submission submission \
+  --snapshots harness/selftest/snapshots \
+  --eval harness/selftest/eval.jsonl \
+  --conflicts-gold harness/selftest/conflicts_gold.json \
+  --out results/selftest
+```
 
-We run a **larger, hidden question set** with the same format and the same scorer. Four things count:
+## Repository layout
 
-| | Weight | What we look for |
-|---|---|---|
-| **Accuracy** | 55% | The current, correctly-tiered value is in your answer. Repeating an old or wrong value scores **zero** for that question, even if the right value is also there, so hedging by listing every number doesn't pay. Citing the right page earns a little extra. When the site doesn't say, the right answer is "I don't know". |
-| **Conflicts** | 15% | How many real contradictions you list in `conflicts()`, and whether you picked the right winner. |
-| **Consistency** | 15% | The same question asked in different words gets the same answer, and asking twice gives the same answer. |
-| **Speed** | 15% | How quickly you answer. Most answers in 2 seconds or less earns full marks; it drops to zero at 20 seconds. |
+```text
+submission/
+  solution.py          # build(), temporal system, retrieval, and conflict reporting
+  requirements.txt     # no third-party packages
+  NOTES.md             # concise implementation notes
+README.md
+.gitignore
+```
 
-Speed and consistency are **multiplied by your accuracy**: a fast or consistent system that's wrong doesn't earn those points. Ingest (loading the snapshots) isn't timed for scoring, but must finish within 30 minutes.
+The evaluator, public practice questions, and supplied snapshot data may live in the local participant kit; only the code and non-sensitive documentation need to be published.
 
-Hidden questions include re-worded versions of the public ones, "as of" date questions, and questions about things that *changed* between snapshots.
+## Limitations and next steps
 
-## A simple way to approach it
+- This is a snapshot-bound system: it never calls the live site and has no automatic recrawl pipeline.
+- The focused responders cover the evaluated financial-product patterns; unanticipated wording relies on lexical retrieval and may need a richer semantic parser.
+- The fallback retrieval can return a relevant passage rather than abstaining when its lexical evidence is weak. A calibrated confidence threshold would make refusal behavior more conservative.
+- Dates before the oldest available snapshot resolve to that earliest snapshot; production behavior should instead expose the absence of historical coverage.
+- Conflict reporting is intentionally conservative and currently omits same-snapshot comparison, non-rate contradictions, and candidates beyond its 30-item cap.
+- All snapshot state is held in memory. A production system would persist normalized claims, provenance, and change events; add monitoring; and periodically re-index new crawls.
 
-1. **Read the snapshots yourself first.** (Run the scorer once to unpack them, or unzip `snapshots_zip/`.) Pick five topics (a rate, a fee, branch hours) and follow them across the dates. You'll quickly see the kinds of mess.
-2. **Keep history, not just the latest copy.** Remember *when* you saw each fact and *where*.
-3. **Decide what "current" means.** Is the newer page right? Does an official rate sheet beat a blog post? What about an expired promotion? Write your rules down.
-4. **Respect qualifiers.** "6-month" vs "12-month", "rate" vs "APY", "Prime Checking" vs "Prime Business Checking". These are different facts, not conflicts.
-5. **Be honest.** If the website doesn't say, don't guess.
-6. **Run the public eval often.** Read the questions you miss, not just the score.
+## Public-repository and security policy
 
-## Rules
+This repository is designed to contain code and documentation only.
 
-- Use only the snapshots provided to answer questions. No live website calls.
-- Each `answer` call must finish within 60 seconds.
-- The data is a real credit union's public website, shared for this event only. Don't redistribute it.
+**Do not commit or publish:**
+
+- supplied website snapshots, whether unpacked (`snapshots/`) or archived (`snapshots_zip/`);
+- API keys, `.env` files, credentials, tokens, or local configuration secrets;
+- hidden evaluation data, gold conflict annotations, or any other non-public assignment material;
+- generated caches and local result artifacts unless explicitly permitted.
+
+The included `.gitignore` excludes the supplied snapshot directories, `.env`, Python cache files, and local results. Before publishing, review the staged file list and scan the commit history as well as the working tree—removing a secret only from the latest file is not sufficient if it was committed earlier.
+
+
+
